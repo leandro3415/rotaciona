@@ -83,9 +83,9 @@
       //
       // Opção B: preencha abaixo (menos seguro, fica no ficheiro).
       // Ex.: "https://xxxx.supabase.co"
-      const SUPABASE_URL_DEFAULT = "https://okooczucxgmmzywnores.supabase.co";
+      const SUPABASE_URL_DEFAULT = "COLE_AQUI_SUA_SUPABASE_URL";
       // Atenção: essa chave fica visível no frontend. Use policies/view de leitura somente.
-      const SUPABASE_ANON_KEY_DEFAULT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9rb29jenVjeGdtbXp5d25vcmVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5NzQxNTAsImV4cCI6MjA5MTU1MDE1MH0.uOxb9nz4l0nuGfqDM_W5fvyTmFurGy4J90N2GOnCQXc";
+      const SUPABASE_ANON_KEY_DEFAULT = "COLE_AQUI_SUA_SUPABASE_ANON_KEY";
       // Nome exato da tabela (com espaço). Se você usar outra, mude aqui.
       const TABLE_NAME = "ZAP DISPONIVEL";
 
@@ -116,6 +116,96 @@
       const SUPABASE_URL = (__q.sbUrl || SUPABASE_URL_DEFAULT || "").trim();
       const SUPABASE_ANON_KEY = (__q.sbAnon || SUPABASE_ANON_KEY_DEFAULT || "").trim();
 
+      /**
+       * Mensagens pré-preenchidas (alternadas) ao abrir o WhatsApp.
+       * Podes acrescentar/remover frases aqui.
+       */
+      const WA_PREFILL_MESSAGES = [
+        "Oi! Quero conhecer seus conteúdos 🙂",
+        "Oi! Quero ver seus conteúdos 🙂",
+        "Oi! Quero ver seu conteúdo exclusivo 🙂",
+        "Oi! Quero saber mais sobre seus conteúdos 🙂",
+        "Oi! Tenho interesse nos seus conteúdos 🙂",
+        "Oi! Pode me mandar as opções de conteúdo? 🙂",
+        "Oi! Quero ver o que você tem disponível 🙂",
+        "Oi! Quero começar a acompanhar seus conteúdos 🙂",
+        "Oi! Quero ver seus conteúdos novos 🙂",
+        "Oi! Quero ver seus conteúdos e valores 🙂",
+        "Oi! Quero ver seus conteúdos e como funciona 🙂",
+        "Oi! Quero ver seus conteúdos e pagamento 🙂",
+        "Oi! Quero ver seus conteúdos e o que você recomenda 🙂",
+        "Oi! Quero ver seus conteúdos, pode me ajudar? 🙂",
+        "Oi! Quero ver seus conteúdos, estou disponível agora 🙂",
+      ];
+
+      function readOptionalPrefillFromQuery() {
+        try {
+          const u = new URL(window.location.href);
+          const raw = String(u.searchParams.get("msg") || "").trim();
+          return raw;
+        } catch {
+          return "";
+        }
+      }
+
+      function choosePrefillMessage() {
+        const forced = readOptionalPrefillFromQuery();
+        if (forced) return forced.slice(0, 800);
+
+        const key = "pressel_wa_msg_rr_v1";
+        const storageWorks = (kind) => {
+          try {
+            if (kind === "local" && typeof localStorage === "undefined") return false;
+            if (kind === "session" && typeof sessionStorage === "undefined") return false;
+            const s = kind === "local" ? localStorage : sessionStorage;
+            const t = "__zapman_msg_test__";
+            s.setItem(t, "1");
+            s.removeItem(t);
+            return true;
+          } catch {
+            return false;
+          }
+        };
+
+        const canLocal = storageWorks("local");
+        const canSession = storageWorks("session");
+        const list = WA_PREFILL_MESSAGES.filter((s) => String(s || "").trim());
+        if (!list.length) return "";
+
+        if (!canLocal && !canSession) {
+          return list[Math.floor(Math.random() * list.length)];
+        }
+
+        const readIdx = () => {
+          try {
+            if (canLocal) return Number(localStorage.getItem(key) || "0") || 0;
+          } catch {
+            /* ignore */
+          }
+          try {
+            if (canSession) return Number(sessionStorage.getItem(key) || "0") || 0;
+          } catch {
+            /* ignore */
+          }
+          return 0;
+        };
+
+        const writeIdx = (next) => {
+          const v = String((next % 1000000 + 1000000) % 1000000);
+          try {
+            if (canLocal) localStorage.setItem(key, v);
+            else if (canSession) sessionStorage.setItem(key, v);
+          } catch {
+            /* ignore */
+          }
+        };
+
+        const idx = readIdx();
+        const msg = list[idx % list.length];
+        writeIdx(idx + 1);
+        return String(msg);
+      }
+
       function normalizeDigits(v) {
         const d = String(v ?? "").replace(/\D/g, "");
         return d;
@@ -124,7 +214,9 @@
       function waUrlForNumberDigits(digits) {
         const d = normalizeDigits(digits);
         if (!d) return "";
-        return `https://wa.me/${d}`;
+        const msg = choosePrefillMessage();
+        if (!msg) return `https://wa.me/${d}`;
+        return `https://wa.me/${d}?text=${encodeURIComponent(msg)}`;
       }
 
       function supabaseRestUrl() {
