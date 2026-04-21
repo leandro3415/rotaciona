@@ -42,11 +42,17 @@
         border: 6px solid var(--ring);
         border-top-color: rgba(34, 197, 94, 0.85);
         animation: spin 0.9s linear infinite;
+        will-change: transform;
         box-shadow: 0 18px 65px rgba(0, 0, 0, 0.38);
       }
       @keyframes spin {
         to {
           transform: rotate(360deg);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .spinner {
+          animation-duration: 1.4s;
         }
       }
       .title {
@@ -72,10 +78,14 @@
 
     <script>
       // ======== CONFIGURE AQUI ========
+      // Opção A (recomendado): passe credenciais por URL (não fica gravado no HTML):
+      //   /pressell/index.html?sb_url=https://xxxx.supabase.co&sb_anon=ANON_PUBLICA
+      //
+      // Opção B: preencha abaixo (menos seguro, fica no ficheiro).
       // Ex.: "https://xxxx.supabase.co"
-      const SUPABASE_URL = "COLE_AQUI_SUA_SUPABASE_URL";
+      const SUPABASE_URL_DEFAULT = "https://okooczucxgmmzywnores.supabase.co";
       // Atenção: essa chave fica visível no frontend. Use policies/view de leitura somente.
-      const SUPABASE_ANON_KEY = "COLE_AQUI_SUA_SUPABASE_ANON_KEY";
+      const SUPABASE_ANON_KEY_DEFAULT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9rb29jenVjeGdtbXp5d25vcmVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5NzQxNTAsImV4cCI6MjA5MTU1MDE1MH0.uOxb9nz4l0nuGfqDM_W5fvyTmFurGy4J90N2GOnCQXc";
       // Nome exato da tabela (com espaço). Se você usar outra, mude aqui.
       const TABLE_NAME = "ZAP DISPONIVEL";
 
@@ -85,13 +95,26 @@
       const COL_NUM = "NUMERO";
       const COL_INST = "INSTÂNCIA";
 
-      // Quantas vezes tentar antes de desistir
-      const MAX_TRIES = 10;
       // Intervalo entre tentativas (ms)
       const RETRY_MS = 1200;
       // Timeout por request (ms)
       const REQ_TIMEOUT_MS = 5000;
       // =================================
+
+      function readSupabaseConfigFromQuery() {
+        try {
+          const u = new URL(window.location.href);
+          const sbUrl = String(u.searchParams.get("sb_url") || "").trim();
+          const sbAnon = String(u.searchParams.get("sb_anon") || "").trim();
+          return { sbUrl, sbAnon };
+        } catch {
+          return { sbUrl: "", sbAnon: "" };
+        }
+      }
+
+      const __q = readSupabaseConfigFromQuery();
+      const SUPABASE_URL = (__q.sbUrl || SUPABASE_URL_DEFAULT || "").trim();
+      const SUPABASE_ANON_KEY = (__q.sbAnon || SUPABASE_ANON_KEY_DEFAULT || "").trim();
 
       function normalizeDigits(v) {
         const d = String(v ?? "").replace(/\D/g, "");
@@ -153,18 +176,56 @@
       function chooseRowRoundRobin(rows) {
         if (!rows.length) return null;
         const key = "pressel_rr_idx_v1";
-        let idx = 0;
-        try {
-          idx = Number(localStorage.getItem(key) || "0") || 0;
-        } catch {
-          idx = 0;
+        const storageWorks = (kind) => {
+          try {
+            if (kind === "local" && typeof localStorage === "undefined") return false;
+            if (kind === "session" && typeof sessionStorage === "undefined") return false;
+            const s = kind === "local" ? localStorage : sessionStorage;
+            const t = "__zapman_rr_test__";
+            s.setItem(t, "1");
+            s.removeItem(t);
+            return true;
+          } catch {
+            return false;
+          }
+        };
+
+        const canLocal = storageWorks("local");
+        const canSession = storageWorks("session");
+
+        // Sem storage persistível: alterna aleatoriamente (melhor do que ficar sempre no 1.º número).
+        if (!canLocal && !canSession) {
+          const j = Math.floor(Math.random() * rows.length);
+          return rows[j] || rows[0];
         }
+
+        const readIdx = () => {
+          try {
+            if (canLocal) return Number(localStorage.getItem(key) || "0") || 0;
+          } catch {
+            /* ignore */
+          }
+          try {
+            if (canSession) return Number(sessionStorage.getItem(key) || "0") || 0;
+          } catch {
+            /* ignore */
+          }
+          return 0;
+        };
+
+        const writeIdx = (next) => {
+          const v = String((next % 1000000 + 1000000) % 1000000);
+          try {
+            if (canLocal) localStorage.setItem(key, v);
+            else if (canSession) sessionStorage.setItem(key, v);
+          } catch {
+            /* ignore */
+          }
+        };
+
+        const idx = readIdx();
         const picked = rows[idx % rows.length];
-        try {
-          localStorage.setItem(key, String((idx + 1) % 1000000));
-        } catch {
-          // ignore
-        }
+        writeIdx(idx + 1);
         return picked;
       }
 
@@ -179,7 +240,10 @@
       }
 
       async function tryRedirectFlow() {
-        if (!String(SUPABASE_URL).includes("supabase.co") || String(SUPABASE_ANON_KEY).includes("COLE_AQUI")) {
+        const urlOk = /^https?:\/\//i.test(String(SUPABASE_URL || ""));
+        const keyOk = String(SUPABASE_ANON_KEY || "").length > 20 && !String(SUPABASE_ANON_KEY).includes("COLE_AQUI");
+        if (!urlOk || !keyOk) {
+          // Sem config válida não há como redirecionar.
           return;
         }
 
