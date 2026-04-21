@@ -83,9 +83,9 @@
       //
       // Opção B: preencha abaixo (menos seguro, fica no ficheiro).
       // Ex.: "https://xxxx.supabase.co"
-      const SUPABASE_URL_DEFAULT = "COLE_AQUI_SUA_SUPABASE_URL";
+      const SUPABASE_URL_DEFAULT = "https://okooczucxgmmzywnores.supabase.co";
       // Atenção: essa chave fica visível no frontend. Use policies/view de leitura somente.
-      const SUPABASE_ANON_KEY_DEFAULT = "COLE_AQUI_SUA_SUPABASE_ANON_KEY";
+      const SUPABASE_ANON_KEY_DEFAULT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9rb29jenVjeGdtbXp5d25vcmVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5NzQxNTAsImV4cCI6MjA5MTU1MDE1MH0.uOxb9nz4l0nuGfqDM_W5fvyTmFurGy4J90N2GOnCQXc";
       // Nome exato da tabela (com espaço). Se você usar outra, mude aqui.
       const TABLE_NAME = "ZAP DISPONIVEL";
 
@@ -211,12 +211,48 @@
         return d;
       }
 
+      /** Evita que um erro nas frases pré-prontas impeça o redirect (loop infinito no spinner). */
+      function safeChoosePrefillMessage() {
+        try {
+          return choosePrefillMessage();
+        } catch {
+          return "";
+        }
+      }
+
+      /**
+       * URLs muito longas falham em alguns browsers / WebViews ao fazer redirect.
+       * Mantém sempre um wa.me válido mesmo que o texto tenha de ser cortado.
+       */
       function waUrlForNumberDigits(digits) {
         const d = normalizeDigits(digits);
         if (!d) return "";
-        const msg = choosePrefillMessage();
-        if (!msg) return `https://wa.me/${d}`;
-        return `https://wa.me/${d}?text=${encodeURIComponent(msg)}`;
+        const base = `https://wa.me/${d}`;
+        const msg = safeChoosePrefillMessage();
+        if (!msg) return base;
+        try {
+          const maxTotal = 2000;
+          let budget = maxTotal - base.length - "?text=".length;
+          if (budget < 24) return base;
+          const encFull = encodeURIComponent(msg);
+          if (encFull.length <= budget) return `${base}?text=${encFull}`;
+          let lo = 0;
+          let hi = msg.length;
+          let best = 0;
+          while (lo <= hi) {
+            const mid = Math.floor((lo + hi) / 2);
+            const enc = encodeURIComponent(msg.slice(0, mid));
+            if (enc.length <= budget) {
+              best = mid;
+              lo = mid + 1;
+            } else {
+              hi = mid - 1;
+            }
+          }
+          return `${base}?text=${encodeURIComponent(msg.slice(0, best))}`;
+        } catch {
+          return base;
+        }
       }
 
       function supabaseRestUrl() {
