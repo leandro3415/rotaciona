@@ -66,7 +66,6 @@
         line-height: 1.35;
         max-width: 520px;
       }
-      /* sem UI de erro/fallback para o lead */
     </style>
   </head>
   <body>
@@ -82,22 +81,38 @@
       //   /pressell/index.html?sb_url=https://xxxx.supabase.co&sb_anon=ANON_PUBLICA
       //
       // Opção B: preencha abaixo (menos seguro, fica no ficheiro).
-      // Ex.: "https://xxxx.supabase.co"
-      const SUPABASE_URL_DEFAULT = "https://okooczucxgmmzywnores.supabase.co";
-      // Atenção: essa chave fica visível no frontend. Use policies/view de leitura somente.
+      /**
+       * Modo recomendado (Vercel): passe credenciais do Supabase no URL para distribuir usando `ZAP DISPONIVEL`.
+       *
+       * Opcional: router HTTPS no ZapMan (não usar HTTP/IP directo desde HTTPS — mixed-content/CORS).
+       *   ?zapman=https://SEU_ZAPMAN_PUBLICO&cluster_secret=OPCIONAL
+       *
+       * No servidor ZapMan:
+       * - ZAPMAN_QUIZ_ROUTER_PUBLIC=1 (se você usa ZAPMAN_OUTREACH_CLUSTER_SECRET)
+       * - ZAPMAN_CORS_ORIGINS=https://rotaciona.vercel.app
+       */
+      const ZAPMAN_BASE_DEFAULT = ""; // ex.: "https://zapman.seudominio.com" (HTTPS recomendado)
+
+      const SUPABASE_URL_DEFAULT = "https://okooczucxgmmzywnores.supabase.co/";
       const SUPABASE_ANON_KEY_DEFAULT = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9rb29jenVjeGdtbXp5d25vcmVzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzU5NzQxNTAsImV4cCI6MjA5MTU1MDE1MH0.uOxb9nz4l0nuGfqDM_W5fvyTmFurGy4J90N2GOnCQXc";
-      // Nome exato da tabela (com espaço). Se você usar outra, mude aqui.
       const TABLE_NAME = "ZAP DISPONIVEL";
 
-      // Colunas (mantém compatibilidade com o seu SQL)
       const COL_STATUS = "STATUS";
       const COL_DISP = "DISPONIVEL ?";
       const COL_NUM = "NUMERO";
       const COL_INST = "INSTÂNCIA";
+      /** Capacidade (ZapMan preenche). Se a tabela não tiver estas colunas, o fetch faz fallback sem elas. */
+      const COL_ATIVOS = "ATIVOS";
+      const COL_LIMITE = "LIMITE";
+      const COL_LEADS_HOJE = "LEADS_HOJE";
+      const COL_LAST_ASSIGNED_AT = "LAST_ASSIGNED_AT";
 
-      // Intervalo entre tentativas (ms)
+      /** Se 1, tenta PATCH no Supabase antes de redirecionar (requer políticas RLS ok para anon update). */
+      const UPDATE_ZAP_DISPONIVEL_COUNTERS = String(
+        new URL(window.location.href).searchParams.get("update_counters") || ""
+      ).trim() === "1";
+
       const RETRY_MS = 1200;
-      // Timeout por request (ms)
       const REQ_TIMEOUT_MS = 5000;
       // =================================
 
@@ -112,14 +127,24 @@
         }
       }
 
+      function readZapmanConfigFromQuery() {
+        try {
+          const u = new URL(window.location.href);
+          const zap = String(u.searchParams.get("zapman") || u.searchParams.get("zapman_base") || "").trim();
+          const sec = String(u.searchParams.get("cluster_secret") || u.searchParams.get("zapman_secret") || "").trim();
+          return { zap, sec };
+        } catch {
+          return { zap: "", sec: "" };
+        }
+      }
+
       const __q = readSupabaseConfigFromQuery();
+      const __z = readZapmanConfigFromQuery();
+      const ZAPMAN_BASE = (__z.zap || ZAPMAN_BASE_DEFAULT || "").trim().replace(/\/+$/, "");
+      const ZAPMAN_CLUSTER_SECRET = (__z.sec || "").trim();
       const SUPABASE_URL = (__q.sbUrl || SUPABASE_URL_DEFAULT || "").trim();
       const SUPABASE_ANON_KEY = (__q.sbAnon || SUPABASE_ANON_KEY_DEFAULT || "").trim();
 
-      /**
-       * Mensagens pré-preenchidas (alternadas) ao abrir o WhatsApp.
-       * Podes acrescentar/remover frases aqui.
-       */
       const WA_PREFILL_MESSAGES = [
         "Oi! Quero conhecer seus conteúdos 🙂",
         "Oi! Quero ver seus conteúdos 🙂",
@@ -141,8 +166,7 @@
       function readOptionalPrefillFromQuery() {
         try {
           const u = new URL(window.location.href);
-          const raw = String(u.searchParams.get("msg") || "").trim();
-          return raw;
+          return String(u.searchParams.get("msg") || "").trim();
         } catch {
           return "";
         }
@@ -207,11 +231,9 @@
       }
 
       function normalizeDigits(v) {
-        const d = String(v ?? "").replace(/\D/g, "");
-        return d;
+        return String(v ?? "").replace(/\D/g, "");
       }
 
-      /** Evita que um erro nas frases pré-prontas impeça o redirect (loop infinito no spinner). */
       function safeChoosePrefillMessage() {
         try {
           return choosePrefillMessage();
@@ -220,10 +242,6 @@
         }
       }
 
-      /**
-       * URLs muito longas falham em alguns browsers / WebViews ao fazer redirect.
-       * Mantém sempre um wa.me válido mesmo que o texto tenha de ser cortado.
-       */
       function waUrlForNumberDigits(digits) {
         const d = normalizeDigits(digits);
         if (!d) return "";
@@ -260,13 +278,9 @@
         return `${base}/rest/v1/${encodeURIComponent(TABLE_NAME)}`;
       }
 
-      async function fetchEligibleRows() {
+      async function fetchRowsSelect(selectList) {
         const url = new URL(supabaseRestUrl());
-        // select colunas necessárias
-        // Em PostgREST/Supabase: no select, colunas com espaço/? precisam de aspas.
-        url.searchParams.set("select", `${COL_NUM},"${COL_INST}",${COL_STATUS},"${COL_DISP}"`);
-        // Sem filtros: vamos ler todas as linhas e filtrar no cliente.
-        // limite
+        url.searchParams.set("select", selectList);
         url.searchParams.set("limit", "200");
 
         const ac = new AbortController();
@@ -286,13 +300,13 @@
           try {
             json = text ? JSON.parse(text) : null;
           } catch {
-            // pode ser erro em texto
+            /* ignore */
           }
           if (!r.ok) {
             const detail =
               (json && (json.message || json.error_description || json.error)) ||
               (text || `HTTP ${r.status}`);
-            throw new Error(`Supabase REST falhou: ${detail}`);
+            throw new Error(String(detail));
           }
           if (!Array.isArray(json)) return [];
           return json;
@@ -301,9 +315,71 @@
         }
       }
 
-      function chooseRowRoundRobin(rows) {
+      /** Lê linhas; tenta incluir ATIVOS/LIMITE (ZapMan). Se a tabela não tiver, repete sem essas colunas. */
+      async function fetchEligibleRows() {
+        const full = `${COL_NUM},"${COL_INST}",${COL_STATUS},"${COL_DISP}",${COL_ATIVOS},${COL_LIMITE},${COL_LEADS_HOJE},${COL_LAST_ASSIGNED_AT}`;
+        const mid = `${COL_NUM},"${COL_INST}",${COL_STATUS},"${COL_DISP}",${COL_ATIVOS},${COL_LIMITE}`;
+        const basic = `${COL_NUM},"${COL_INST}",${COL_STATUS},"${COL_DISP}"`;
+        try {
+          return await fetchRowsSelect(full);
+        } catch {
+          try {
+            return await fetchRowsSelect(mid);
+          } catch {
+            return await fetchRowsSelect(basic);
+          }
+        }
+      }
+
+      function readAtivosDefault0(row) {
+        const raw = row?.[COL_ATIVOS];
+        if (raw == null || String(raw).trim() === "") return 0;
+        return Math.max(0, Math.floor(Number(raw) || 0));
+      }
+
+      function readLeadsHojeDefault0(row) {
+        const raw = row?.[COL_LEADS_HOJE];
+        if (raw == null || String(raw).trim() === "") return 0;
+        return Math.max(0, Math.floor(Number(raw) || 0));
+      }
+
+      /** Vazio conta como «mais antigo» ⇒ menor ms primeiro na ordenação. */
+      function readLastAssignedMs(row) {
+        const raw = row?.[COL_LAST_ASSIGNED_AT];
+        if (raw == null || String(raw).trim() === "") return 0;
+        const t = new Date(String(raw)).getTime();
+        return Number.isFinite(t) ? t : 0;
+      }
+
+      function chooseRowFairDistribution(rows, visitJitter) {
         if (!rows.length) return null;
-        const key = "pressel_rr_idx_v1";
+        const jitter = Math.max(0, Math.floor(Number(visitJitter) || 0)) % rows.length;
+        return chooseRowRoundRobin(rows, jitter);
+      }
+
+      /**
+       * Escolhe a linha do WhatsApp «menos ocupada» (filtro STATUS=ON / DISPONIVEL=SIM fica antes, em `isEligible`).
+       * Prioridade: menor ATIVOS → menor LEADS_HOJE → LAST_ASSIGNED_AT mais antigo → rodízio estável + leve aleatoriedade.
+       */
+      function chooseRowRoundRobin(rows, jitter) {
+        if (!rows.length) return null;
+        const scored = rows.map((r, i) => {
+          const at = readAtivosDefault0(r);
+          const lh = readLeadsHojeDefault0(r);
+          const lastMs = readLastAssignedMs(r);
+          const inst = String(r?.[COL_INST] ?? "").trim();
+          return { r, at, lh, lastMs, inst, i };
+        });
+        scored.sort((a, b) => a.at - b.at || a.lh - b.lh || a.lastMs - b.lastMs || a.inst.localeCompare(b.inst) || a.i - b.i);
+        const best = scored[0];
+        const tied = scored.filter((x) => x.at === best.at && x.lh === best.lh && x.lastMs === best.lastMs);
+        const pool = tied.map((x) => x.r);
+
+        const n = pool.length;
+        const jitter0 =
+          Math.max(0, Math.floor(Number(jitter) || 0)) % Math.max(1, n) + Math.floor(Math.random() * Math.max(1, n));
+        const j0 = n ? jitter0 % n : 0;
+        const key = "pressel_rr_idx_v2";
         const storageWorks = (kind) => {
           try {
             if (kind === "local" && typeof localStorage === "undefined") return false;
@@ -321,9 +397,8 @@
         const canLocal = storageWorks("local");
         const canSession = storageWorks("session");
 
-        // Sem storage persistível: alterna aleatoriamente (melhor do que ficar sempre no 1.º número).
         if (!canLocal && !canSession) {
-          const j = Math.floor(Math.random() * rows.length);
+          const j = (j0 + Math.floor(Math.random() * rows.length)) % rows.length;
           return rows[j] || rows[0];
         }
 
@@ -351,9 +426,9 @@
           }
         };
 
-        const idx = readIdx();
-        const picked = rows[idx % rows.length];
-        writeIdx(idx + 1);
+        const base = readIdx();
+        const picked = pool[(base + j0) % Math.max(1, n)];
+        writeIdx(base + 1);
         return picked;
       }
 
@@ -371,7 +446,6 @@
         const urlOk = /^https?:\/\//i.test(String(SUPABASE_URL || ""));
         const keyOk = String(SUPABASE_ANON_KEY || "").length > 20 && !String(SUPABASE_ANON_KEY).includes("COLE_AQUI");
         if (!urlOk || !keyOk) {
-          // Sem config válida não há como redirecionar.
           return;
         }
 
@@ -379,7 +453,8 @@
         const eligible = (rowsAll || []).filter(isEligible);
         if (!eligible.length) return { ok: false, reason: "no_eligible" };
 
-        const picked = chooseRowRoundRobin(eligible);
+        const visitJitter = eligible.length > 1 ? Math.floor(Math.random() * eligible.length) : 0;
+        const picked = chooseRowFairDistribution(eligible, visitJitter);
         const num = picked?.[COL_NUM];
         const digits = normalizeDigits(num);
         const waUrl = waUrlForNumberDigits(digits);
@@ -387,30 +462,160 @@
           return { ok: false, reason: "invalid_number" };
         }
 
+        if (UPDATE_ZAP_DISPONIVEL_COUNTERS && picked) {
+          try {
+            await patchZapDisponivelCounters(picked);
+          } catch {
+            /* ignore */
+          }
+        }
+
         window.location.replace(waUrl);
 
         return { ok: true, waUrl };
       }
 
+      async function patchZapDisponivelCounters(row) {
+        const digits = normalizeDigits(row?.[COL_NUM]);
+        if (!digits) return;
+        const inst = String(row?.[COL_INST] ?? "").trim();
+
+        const url = new URL(supabaseRestUrl());
+        // Filtro por número (e instância se existir) — evita update em massa.
+        url.searchParams.set(`${COL_NUM}`, `eq.${digits}`);
+        if (inst) url.searchParams.set(`${COL_INST}`, `eq.${inst}`);
+
+        const curLh = readLeadsHojeDefault0(row);
+        const nextLh = curLh + 1;
+        const nowIso = new Date().toISOString();
+
+        const ac = new AbortController();
+        const t = setTimeout(() => ac.abort(), REQ_TIMEOUT_MS);
+        try {
+          const r = await fetch(url.toString(), {
+            method: "PATCH",
+            signal: ac.signal,
+            headers: {
+              apikey: SUPABASE_ANON_KEY,
+              Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+              Accept: "application/json",
+              "Content-Type": "application/json",
+              Prefer: "return=minimal",
+            },
+            body: JSON.stringify({
+              [COL_LEADS_HOJE]: nextLh,
+              [COL_LAST_ASSIGNED_AT]: nowIso,
+            }),
+          });
+          if (!r.ok) {
+            const txt = await r.text().catch(() => "");
+            throw new Error(txt || `HTTP ${r.status}`);
+          }
+        } finally {
+          clearTimeout(t);
+        }
+      }
+
+      function setStatus(title, sub) {
+        try {
+          const t = document.querySelector(".title");
+          const s = document.querySelector(".sub");
+          if (t && title) t.textContent = title;
+          if (s && sub) s.textContent = sub;
+        } catch {
+          /* ignore */
+        }
+      }
+
+      async function tryZapmanQuizRouterFlow() {
+        const base = String(ZAPMAN_BASE || "").trim().replace(/\/+$/, "");
+        if (!/^https?:\/\//i.test(base)) return { ok: false, reason: "no_zapman_base" };
+        try {
+          const h = new URL(base).hostname.toLowerCase();
+          if (h === "127.0.0.1" || h === "localhost") return { ok: false, reason: "zapman_host_blocked" };
+          if (h === "72.61.44.250") return { ok: false, reason: "zapman_host_blocked" };
+        } catch {
+          return { ok: false, reason: "zapman_url_invalida" };
+        }
+
+        const msg = safeChoosePrefillMessage();
+        const u = new URL(`${base}/api/quiz-router/route`);
+        u.searchParams.set("redirect", "0"); // força JSON
+        if (msg) u.searchParams.set("message", msg);
+
+        const headers = { Accept: "application/json" };
+        if (ZAPMAN_CLUSTER_SECRET) headers["X-Zapman-Cluster-Secret"] = ZAPMAN_CLUSTER_SECRET;
+
+        const ac = new AbortController();
+        const t = setTimeout(() => ac.abort(), REQ_TIMEOUT_MS);
+        try {
+          const r = await fetch(u.toString(), { method: "GET", signal: ac.signal, mode: "cors", headers });
+          const text = await r.text();
+          let json = null;
+          try {
+            json = text ? JSON.parse(text) : null;
+          } catch {
+            /* ignore */
+          }
+          if (!r.ok || !json?.ok || !json?.waLink) {
+            const detail = (json && (json.error || json.message)) || text || `HTTP ${r.status}`;
+            throw new Error(String(detail));
+          }
+          window.location.replace(String(json.waLink));
+          return { ok: true, waUrl: String(json.waLink) };
+        } finally {
+          clearTimeout(t);
+        }
+      }
+
       async function start() {
-        // Não mostrar erros ao lead: mantém a tela de carregamento e tenta para sempre.
-        // Backoff leve para não martelar o Supabase.
         let waitMs = RETRY_MS;
+        let warnedNoConfig = false;
         for (;;) {
           try {
+            // 1) Supabase (ZAP DISPONIVEL) — mesmo critério usado pelo ZapMan local/VPS quando ambos atualizam a tabela.
             const r = await tryRedirectFlow();
             if (r?.ok) return;
-          } catch {
-            /* ignora */
+
+            // 2) ZapMan HTTPS (opcional; não usar HTTP/IP misto desde páginas HTTPS)
+            if (ZAPMAN_BASE) {
+              const z = await tryZapmanQuizRouterFlow();
+              if (z?.ok) return;
+            }
+          } catch (e) {
+            // Mostra erro útil (senão parece “loading infinito” silencioso)
+            if (!warnedNoConfig) {
+              warnedNoConfig = true;
+              const msg = String(e?.message || e || "");
+              setStatus(
+                "Não consegui redirecionar automaticamente.",
+                msg
+                  ? msg.slice(0, 520)
+                  : "Configure ?zapman=URL_DO_ZAPMAN (HTTPS) ou sb_url/sb_anon. Verifique também CORS no ZapMan (ZAPMAN_CORS_ORIGINS) e mixed-content (HTTPS→HTTP)."
+              );
+            }
           }
+
+          // Se não há configuração nenhuma, não faz spin infinito “mudo”
+          const hasZap = Boolean(ZAPMAN_BASE);
+          const hasSb =
+            /^https?:\/\//i.test(String(SUPABASE_URL || "")) &&
+            String(SUPABASE_ANON_KEY || "").length > 20 &&
+            !String(SUPABASE_ANON_KEY).includes("COLE_AQUI");
+          if (!hasZap && !hasSb) {
+            setStatus(
+              "Configuração em falta",
+              'Adicione no URL: ?zapman=https://SEU_ZAPMAN (recomendado) ou ?sb_url=...&sb_anon=...'
+            );
+            return;
+          }
+
           await new Promise((r) => setTimeout(r, waitMs));
           waitMs = Math.min(15000, Math.floor(waitMs * 1.25));
         }
       }
 
-      // Auto start
       void start();
     </script>
   </body>
 </html>
-
